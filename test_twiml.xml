@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><Response><Say>Thank you for calling Kayako Support. This is a test response.</Say><Gather input="speech" action="https://demo.twilio.com/welcome/voice/" method="POST"/></Response>
