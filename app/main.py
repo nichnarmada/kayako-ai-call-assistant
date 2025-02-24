@@ -9,6 +9,7 @@ from app.core.logger import logger
 import httpx
 import asyncio
 from typing import Dict, Optional
+from app.services.kayako_service import KayakoService
 
 # Initialize FastAPI app
 app = FastAPI(title="Kayako AI Call Assistant")
@@ -195,28 +196,84 @@ async def process_issue(request: Request):
         conversation.state = CallState.PROCESSING
         logger.info(f"Issue processed successfully", extra={"call_sid": call_sid})
         
-        # TODO: Implement KB search and response generation
-        # For now, just respond with a placeholder message
+        # Search Kayako KB for relevant articles
+        logger.info(f"Searching Kayako KB for: {issue}", extra={"call_sid": call_sid})
+        articles = await KayakoService.search_knowledge_base(issue, limit=3)
         
-        # Update conversation state
-        conversation.state = CallState.COMPLETED
-        
-        # Close Deepgram connection
-        await AudioBridge.close_connection(call_sid)
-        
-        # Clean up transcript callback
-        if call_sid in transcript_callbacks:
-            del transcript_callbacks[call_sid]
-        
-        try:
-            return await TwilioService.create_hangup_response_with_tts(
-                "Thank you for your question. I'll pass this on to our expert support team. They'll follow up shortly via email. Have a great day!"
-            )
-        except Exception as e:
-            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
-            return TwilioService.create_hangup_response(
-                "Thank you for your question. I'll pass this on to our expert support team. They'll follow up shortly via email. Have a great day!"
-            )
+        if articles:
+            # Found relevant articles
+            article = articles[0]  # Use the most relevant article
+            article_title = article.get("title", "")
+            article_id = article.get("id")
+            
+            logger.info(f"Found relevant article: {article_title}", extra={"call_sid": call_sid})
+            
+            # Get the full article content
+            if article_id:
+                try:
+                    full_article = await KayakoService.get_article_content(article_id)
+                    article_content = ""
+                    
+                    # Extract content from the article
+                    contents = full_article.get("contents", [])
+                    if contents:
+                        for content in contents:
+                            if content.get("locale", {}).get("id") == 2:  # English content
+                                article_content = content.get("text", "")
+                                break
+                    
+                    # If we have content, use it to create a better response
+                    if article_content:
+                        # In a full implementation, we would use OpenAI to generate a response based on the article content
+                        # For now, just use a simple response with the article title
+                        response_message = f"I found information about '{article_title}'. {article_content[:200]}... Would you like me to continue?"
+                    else:
+                        response_message = f"I found information about '{article_title}'. Would you like me to help you with that?"
+                except Exception as e:
+                    logger.error(f"Error getting article content: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
+                    response_message = f"I found information about '{article_title}'. Would you like me to help you with that?"
+            else:
+                response_message = f"I found information about '{article_title}'. Would you like me to help you with that?"
+            
+            # Update conversation state
+            conversation.state = CallState.RESPONDING
+            conversation.transcript.append(("AI", response_message))
+            
+            # Close Deepgram connection
+            await AudioBridge.close_connection(call_sid)
+            
+            # Clean up transcript callback
+            if call_sid in transcript_callbacks:
+                del transcript_callbacks[call_sid]
+            
+            try:
+                return await TwilioService.create_hangup_response_with_tts(response_message)
+            except Exception as e:
+                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                return TwilioService.create_hangup_response(response_message)
+        else:
+            # No relevant articles found
+            logger.info(f"No relevant articles found for: {issue}", extra={"call_sid": call_sid})
+            
+            # Update conversation state
+            conversation.state = CallState.COMPLETED
+            
+            # Close Deepgram connection
+            await AudioBridge.close_connection(call_sid)
+            
+            # Clean up transcript callback
+            if call_sid in transcript_callbacks:
+                del transcript_callbacks[call_sid]
+            
+            # Respond with a message indicating that we'll escalate to a human agent
+            response_message = "Thank you for your question. I'll pass this on to our expert support team. They'll follow up shortly via email. Have a great day!"
+            conversation.transcript.append(("AI", response_message))
+            
+            try:
+                return await TwilioService.create_hangup_response_with_tts(response_message)
+            except Exception as e:
+                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                return TwilioService.create_hangup_response(response_message)
     except Exception as e:
         logger.error(f"Error processing issue", extra={"call_sid": call_sid, "error": str(e)}, exc_info=True)
         try:

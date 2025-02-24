@@ -5,9 +5,11 @@ class Settings(BaseSettings):
     # API Keys
     DEEPGRAM_API_KEY: str
     OPENAI_API_KEY: str
-    KAYAKO_API_KEY: str | None = None  # Optional, might use basic auth instead
+    TWILIO_AUTH_TOKEN: str
     
-    # Service URLs
+    # Kayako Credentials
+    KAYAKO_EMAIL: str
+    KAYAKO_PASSWORD: str
     KAYAKO_URL: str = "https://doug-test.kayako.com"
     
     # Deepgram Settings

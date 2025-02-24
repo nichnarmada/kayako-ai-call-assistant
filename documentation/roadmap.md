@@ -16,7 +16,7 @@ This roadmap outlines the step-by-step implementation plan for building the Kaya
 - [x] Sign up for Twilio and obtain a phone number
 - [x] Register for Deepgram and get API key for STT/TTS
 - [x] Verify OpenAI API key works with gpt-4o
-- [ ] Test Kayako API with provided credentials
+- [x] Test Kayako API with provided credentials
 - [x] Install and configure zrok as an alternative to ngrok
 - [x] Set up zrok middleware to handle interstitial pages
 
@@ -37,73 +37,73 @@ This roadmap outlines the step-by-step implementation plan for building the Kaya
 - [x] Set up call state management using CallSid
 - [x] Configure Twilio webhook URLs with zrok
 - [x] Implement call flow control (gather, say, hangup)
-- [ ] Test basic call flow end-to-end
+- [x] Test basic call flow end-to-end
 
 ### Deepgram STT Integration
 
-- [ ] Implement WebSocket connection to Deepgram STT API
-- [ ] Create audio streaming from Twilio to Deepgram
-- [ ] Process and parse Deepgram transcription results
-- [ ] Implement error handling for STT failures
+- [x] Implement WebSocket connection to Deepgram STT API
+- [x] Create audio streaming from Twilio to Deepgram
+- [x] Process and parse Deepgram transcription results
+- [x] Implement error handling for STT failures
 - [ ] Test STT with various accents and background noise
 
 ### Deepgram TTS Integration
 
-- [ ] Implement WebSocket connection to Deepgram TTS API
-- [ ] Convert text responses to audio using Deepgram
-- [ ] Configure voice settings for natural-sounding responses
+- [x] Implement REST API connection to Deepgram TTS API
+- [x] Convert text responses to audio using Deepgram
+- [x] Configure voice settings for natural-sounding responses
 - [ ] Implement caching for common responses
-- [ ] Test TTS with various response types
+- [x] Test TTS with sample responses
 
 ## Phase 3: Conversation Flow & User Data Capture
 
 ### Email Collection & Validation
 
-- [ ] Implement email collection during call
+- [x] Implement email collection during call
 - [ ] Add email validation logic
 - [ ] Implement confirmation step for email accuracy
-- [ ] Store email in conversation state
+- [x] Store email in conversation state
 - [ ] Test email collection with various inputs
 
 ### Conversation State Management
 
-- [ ] Design conversation state data structure
-- [ ] Implement state transitions based on user input
-- [ ] Store conversation history for context
+- [x] Design conversation state data structure
+- [x] Implement state transitions based on user input
+- [x] Store conversation history for context
 - [ ] Implement session timeout and cleanup
 - [ ] Test state management with various call flows
 
 ### Basic Conversation Flow
 
-- [ ] Implement greeting and initial prompt
-- [ ] Create issue identification flow
+- [x] Implement greeting and initial prompt
+- [x] Create issue identification flow
 - [ ] Implement clarification questions when needed
-- [ ] Add conversation context tracking
+- [x] Add conversation context tracking
 - [ ] Test conversation flow with sample scenarios
 
 ## Phase 4: Knowledge Base Integration & Response Generation
 
 ### Kayako KB Integration
 
-- [ ] Implement Kayako API authentication
-- [ ] Create KB search functionality
-- [ ] Optimize search queries for relevance
-- [ ] Implement article content extraction
-- [ ] Test KB search with sample queries
+- [x] Implement Kayako API authentication
+- [x] Create KB search functionality
+- [x] Optimize search queries for relevance
+- [x] Implement article content extraction
+- [x] Test KB search with sample queries
 
 ### OpenAI Integration
 
-- [ ] Set up OpenAI client with proper authentication
+- [x] Set up OpenAI client with proper authentication
 - [ ] Design prompt template for response generation
 - [ ] Implement context-aware response generation
-- [ ] Add logic to determine if answer is found
+- [x] Add logic to determine if answer is found
 - [ ] Test response generation with various KB articles
 
 ### Response Processing
 
-- [ ] Implement response formatting for speech
-- [ ] Add logic to handle long responses
-- [ ] Create fallback responses for common scenarios
+- [x] Implement response formatting for speech
+- [x] Add logic to handle long responses
+- [x] Create fallback responses for common scenarios
 - [ ] Implement response quality checks
 - [ ] Test response processing with various inputs
 
