@@ -11,12 +11,13 @@ class DeepgramService:
     """Service for interacting with Deepgram's STT and TTS APIs via WebSockets."""
     
     @staticmethod
-    async def create_stt_connection(callback: Callable[[str], None]) -> websockets.WebSocketClientProtocol:
+    async def create_stt_connection(callback: Callable[[str], None], call_sid: str = None) -> websockets.WebSocketClientProtocol:
         """
         Create a WebSocket connection to Deepgram's STT API.
         
         Args:
             callback: Function to call with transcription results
+            call_sid: The Twilio Call SID for logging purposes
             
         Returns:
             WebSocket connection
@@ -32,20 +33,24 @@ class DeepgramService:
         }
         
         # Create connection
-        logger.info("Connecting to Deepgram STT API")
+        logger.info("Connecting to Deepgram STT API", extra={"call_sid": call_sid} if call_sid else {})
         try:
             connection = await websockets.connect(url, extra_headers=extra_headers)
             
             # Start a background task to process incoming messages
-            asyncio.create_task(DeepgramService._process_stt_messages(connection, callback))
+            asyncio.create_task(DeepgramService._process_stt_messages(connection, callback, call_sid))
             
             return connection
         except Exception as e:
-            logger.error(f"Error connecting to Deepgram STT API: {str(e)}", exc_info=True)
+            logger.error(f"Error connecting to Deepgram STT API: {str(e)}", 
+                         extra={"call_sid": call_sid} if call_sid else {}, 
+                         exc_info=True)
             raise
     
     @staticmethod
-    async def _process_stt_messages(websocket: websockets.WebSocketClientProtocol, callback: Callable[[str], None]):
+    async def _process_stt_messages(websocket: websockets.WebSocketClientProtocol, 
+                                   callback: Callable[[str], None], 
+                                   call_sid: str = None):
         """Process incoming messages from Deepgram STT API."""
         try:
             async for message in websocket:
@@ -57,16 +62,21 @@ class DeepgramService:
                     
                     # Only process non-empty transcripts
                     if transcript and not data.get("is_final", False):
-                        logger.debug(f"Interim transcript: {transcript}")
+                        logger.info(f"STT interim transcript: {transcript}", 
+                                   extra={"call_sid": call_sid, "transcript_type": "interim"} if call_sid else {})
                     
                     # Call the callback with the final transcript
                     if transcript and data.get("is_final", False):
-                        logger.info(f"Final transcript: {transcript}")
+                        logger.info(f"STT final transcript: {transcript}", 
+                                   extra={"call_sid": call_sid, "transcript_type": "final"} if call_sid else {})
                         callback(transcript)
         except websockets.exceptions.ConnectionClosed:
-            logger.warning("Deepgram STT connection closed")
+            logger.warning("Deepgram STT connection closed", 
+                          extra={"call_sid": call_sid} if call_sid else {})
         except Exception as e:
-            logger.error(f"Error processing Deepgram STT message: {str(e)}", exc_info=True)
+            logger.error(f"Error processing Deepgram STT message: {str(e)}", 
+                        extra={"call_sid": call_sid} if call_sid else {}, 
+                        exc_info=True)
     
     @staticmethod
     async def send_audio_chunk(websocket: websockets.WebSocketClientProtocol, audio_chunk: bytes):

@@ -16,7 +16,9 @@ class TwilioService:
             audio_file_path = await AudioBridge.generate_speech(message)
             
             # Use Play verb to play the generated audio
-            resp.play(f"file://{audio_file_path}")
+            # We need to use a publicly accessible URL for Twilio to access the audio file
+            # For now, we'll use a relative URL that will be served by our FastAPI app
+            resp.play(f"/audio/{os.path.basename(audio_file_path)}")
             
             # Clean up the file after a delay (Twilio needs time to fetch it)
             # This would be better handled with a proper file storage service in production
@@ -24,19 +26,19 @@ class TwilioService:
                 try:
                     # Wait a bit to ensure Twilio has fetched the file
                     import asyncio
-                    asyncio.sleep(10)
+                    asyncio.sleep(30)  # Increased timeout to ensure Twilio has time to fetch the file
                     if os.path.exists(audio_file_path):
                         os.remove(audio_file_path)
                         logger.debug(f"Removed temporary audio file: {audio_file_path}")
                 except Exception as e:
-                    logger.error(f"Error removing temporary audio file: {str(e)}", exc_info=True)
+                    logger.error(f"Error removing temporary audio file: {str(e)}")
             
             # Schedule cleanup
             import threading
-            threading.Timer(30, cleanup_file).start()
+            threading.Timer(60, cleanup_file).start()  # Increased timer to 60 seconds
             
         except Exception as e:
-            logger.error(f"Error generating TTS, falling back to Twilio TTS: {str(e)}", exc_info=True)
+            logger.error(f"Error generating TTS, falling back to Twilio TTS: {str(e)}")
             # Fallback to Twilio's TTS
             resp.say(message)
         
@@ -76,24 +78,26 @@ class TwilioService:
             audio_file_path = await AudioBridge.generate_speech(message)
             
             # Use Play verb to play the generated audio
-            resp.play(f"file://{audio_file_path}")
+            # We need to use a publicly accessible URL for Twilio to access the audio file
+            resp.play(f"/audio/{os.path.basename(audio_file_path)}")
             
             # Clean up the file after a delay
             def cleanup_file():
                 try:
                     import asyncio
-                    asyncio.sleep(10)
+                    asyncio.sleep(30)  # Increased timeout to ensure Twilio has time to fetch the file
                     if os.path.exists(audio_file_path):
                         os.remove(audio_file_path)
+                        logger.debug(f"Removed temporary audio file: {audio_file_path}")
                 except Exception as e:
-                    logger.error(f"Error removing temporary audio file: {str(e)}", exc_info=True)
+                    logger.error(f"Error removing temporary audio file: {str(e)}")
             
             # Schedule cleanup
             import threading
-            threading.Timer(30, cleanup_file).start()
+            threading.Timer(60, cleanup_file).start()  # Increased timer to 60 seconds
             
         except Exception as e:
-            logger.error(f"Error generating TTS, falling back to Twilio TTS: {str(e)}", exc_info=True)
+            logger.error(f"Error generating TTS, falling back to Twilio TTS: {str(e)}")
             # Fallback to Twilio's TTS
             resp.say(message)
         
@@ -113,7 +117,7 @@ class TwilioService:
         """Initialize a new conversation for a call."""
         return Conversation(
             call_sid=call_sid,
-            state=CallState.COLLECTING_EMAIL
+            state=CallState.COLLECTING_ISSUE
         )
         
     @staticmethod

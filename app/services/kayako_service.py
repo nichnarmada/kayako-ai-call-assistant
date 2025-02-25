@@ -34,7 +34,7 @@ class KayakoService:
         }
         
         # Make authentication request
-        logger.info("Authenticating with Kayako API")
+        logger.info("API request: Authenticating with Kayako API")
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(f"{kayako_url}/api/v1/me.json", headers=headers)
@@ -43,13 +43,13 @@ class KayakoService:
                     data = response.json()
                     # Store the session_id for future requests
                     cls._session_id = data.get("session_id")
-                    logger.info(f"Successfully authenticated with Kayako API. Response: {data}")
+                    logger.info(f"API response: Authentication successful, session ID obtained")
                     return cls._session_id
                 else:
-                    logger.error(f"Authentication failed: {response.status_code} - {response.text}")
+                    logger.error(f"API response: Authentication failed: {response.status_code}")
                     raise Exception(f"Authentication failed: {response.text}")
         except Exception as e:
-            logger.error(f"Error authenticating with Kayako API: {str(e)}", exc_info=True)
+            logger.error(f"API error: Authentication request failed: {str(e)}")
             raise
     
     @classmethod
@@ -113,17 +113,16 @@ class KayakoService:
         }
         
         # Use the correct endpoint for searching articles
-        # Based on the error, we need to use a different endpoint or method
         params = {
             "query": query,
             "limit": limit,
             "include": "contents"  # Include article contents in the response
         }
         
-        logger.info(f"Searching Kayako KB: {query}")
+        logger.info(f"API request: Searching KB for '{query}'")
         try:
             async with httpx.AsyncClient() as client:
-                # Try using the helpcenter/articles endpoint instead
+                # Try using the helpcenter/articles endpoint
                 response = await client.get(
                     f"{kayako_url}/api/v1/helpcenter/articles.json", 
                     headers=headers,
@@ -133,13 +132,12 @@ class KayakoService:
                 if response.status_code == 200:
                     data = response.json()
                     articles = data.get("data", [])
-                    logger.info(f"Found {len(articles)} articles matching query")
+                    logger.info(f"API response: Found {len(articles)} articles in KB")
                     return articles
                 else:
-                    logger.error(f"KB search failed: {response.status_code} - {response.text}")
+                    logger.info(f"API response: KB search failed with status {response.status_code}, trying unified search")
                     
                     # If that fails, try the unified search endpoint
-                    logger.info("Trying unified search endpoint")
                     response = await client.get(
                         f"{kayako_url}/api/v1/search.json",
                         headers=headers,
@@ -148,14 +146,15 @@ class KayakoService:
                     
                     if response.status_code == 200:
                         data = response.json()
-                        articles = data.get("data", [])
-                        logger.info(f"Found {len(articles)} articles using unified search")
+                        items = data.get("data", {}).get("items", [])
+                        articles = [item.get("resource", {}) for item in items if item.get("resource_type") == "helpcenter_article"]
+                        logger.info(f"API response: Found {len(articles)} articles via unified search")
                         return articles
                     else:
-                        logger.error(f"Unified search failed: {response.status_code} - {response.text}")
+                        logger.error(f"API response: Unified search failed with status {response.status_code}")
                         return []
         except Exception as e:
-            logger.error(f"Error searching Kayako KB: {str(e)}", exc_info=True)
+            logger.error(f"API error: KB search request failed: {str(e)}")
             return []
     
     @classmethod
@@ -241,7 +240,7 @@ class KayakoService:
         if tags:
             ticket_data["tags"] = tags
         
-        logger.info(f"Creating ticket for {email}: {subject}")
+        logger.info(f"API request: Creating ticket for '{email}' with subject '{subject}'")
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -252,12 +251,12 @@ class KayakoService:
                 
                 if response.status_code in (200, 201):
                     data = response.json()
-                    ticket = data.get("data")
-                    logger.info(f"Successfully created ticket: {ticket.get('id')}")
-                    return ticket
+                    ticket_id = data.get("id")
+                    logger.info(f"API response: Ticket created successfully with ID: {ticket_id}")
+                    return data
                 else:
-                    logger.error(f"Ticket creation failed: {response.status_code} - {response.text}")
+                    logger.error(f"API response: Ticket creation failed with status {response.status_code}")
                     return None
         except Exception as e:
-            logger.error(f"Error creating Kayako ticket: {str(e)}", exc_info=True)
+            logger.error(f"API error: Ticket creation request failed: {str(e)}")
             return None 

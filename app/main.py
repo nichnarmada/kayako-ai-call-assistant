@@ -6,10 +6,14 @@ from app.services.twilio_service import TwilioService
 from app.services.audio_bridge import AudioBridge
 from app.models.call import Conversation, CallState
 from app.core.logger import logger
+from app.services.kayako_service import KayakoService
+from app.services.openai_service import OpenAIService
 import httpx
 import asyncio
-from typing import Dict, Optional
-from app.services.kayako_service import KayakoService
+from typing import Dict, Optional, Any
+import os
+from fastapi.responses import FileResponse
+from tempfile import gettempdir
 
 # Initialize FastAPI app
 app = FastAPI(title="Kayako AI Call Assistant")
@@ -41,11 +45,20 @@ conversations: dict[str, Conversation] = {}
 # Transcript callbacks by call_sid
 transcript_callbacks: Dict[str, asyncio.Queue] = {}
 
+# Store processing results by call_sid
+processing_results: Dict[str, Dict[str, Any]] = {}
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     logger.info("Health check requested")
     return {"status": "healthy"}
+
+@app.post("/")
+async def root_webhook(request: Request, settings: Settings = Depends(get_settings)):
+    """Root endpoint that redirects to the webhook endpoint for Twilio calls."""
+    logger.info("Received request at root endpoint, redirecting to /webhook")
+    return await webhook(request, settings)
 
 @app.post("/webhook")
 async def webhook(request: Request, settings: Settings = Depends(get_settings)):
@@ -73,19 +86,19 @@ async def webhook(request: Request, settings: Settings = Depends(get_settings)):
     
     logger.info(f"Conversation initialized", extra={"call_sid": call_sid})
     
-    # Create initial response asking for email
+    # Create initial response with greeting
     try:
         return await TwilioService.create_response_with_tts(
-            message="Thank you for calling Kayako Support. Please say your email address.",
+            message="Thank you for calling Kayako Support. How can I assist you today?",
             gather_speech=True,
-            action_url="/process_email"
+            action_url="/process_issue"
         )
     except Exception as e:
         logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
         return TwilioService.create_response(
-            message="Thank you for calling Kayako Support. Please say your email address.",
+            message="Thank you for calling Kayako Support. How can I assist you today?",
             gather_speech=True,
-            action_url="/process_email"
+            action_url="/process_issue"
         )
 
 @app.post("/process_email")
@@ -125,10 +138,134 @@ async def process_email(request: Request):
     
     try:
         conversation.email = email
-        conversation.state = CallState.COLLECTING_ISSUE
-        conversation.transcript.append(("AI", "Please say your email address."))
         conversation.transcript.append(("Customer", email))
         logger.info(f"Email processed successfully", extra={"call_sid": call_sid})
+        
+        # Check if we already have an issue
+        if len(conversation.transcript) >= 2 and conversation.transcript[1][0] == "Customer":
+            # We already have the issue, so we can create a ticket or provide the answer
+            issue = conversation.transcript[1][1]
+            
+            # Check if we have a response from OpenAI
+            if len(conversation.transcript) >= 3 and conversation.transcript[2][0] == "AI":
+                response_message = conversation.transcript[2][1]
+                
+                # Check if the response indicates an answer was found
+                answer_found = "human agent" not in response_message.lower() and "follow up" not in response_message.lower() and "pass this on" not in response_message.lower()
+                
+                if answer_found:
+                    # If an answer was found, respond and end the call
+                    conversation.state = CallState.COMPLETED
+                    
+                    # Close Deepgram connection
+                    await AudioBridge.close_connection(call_sid)
+                    
+                    # Clean up transcript callback
+                    if call_sid in transcript_callbacks:
+                        del transcript_callbacks[call_sid]
+                    
+                    try:
+                        return await TwilioService.create_hangup_response_with_tts(
+                            f"Thank you for providing your email. {response_message} Have a great day!"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                        return TwilioService.create_hangup_response(
+                            f"Thank you for providing your email. {response_message} Have a great day!"
+                        )
+                else:
+                    # If no answer was found, create a ticket and escalate
+                    conversation.state = CallState.PROCESSING
+                    
+                    # Generate ticket summary
+                    ticket_data = await OpenAIService.create_ticket_summary(conversation.transcript)
+                    
+                    # Create ticket in Kayako
+                    try:
+                        ticket = await KayakoService.create_ticket(
+                            email=conversation.email,
+                            subject=ticket_data["subject"],
+                            content=ticket_data["content"],
+                            tags=["ai-escalated", "phone-call"]
+                        )
+                        
+                        logger.info(f"Ticket created successfully", extra={"call_sid": call_sid})
+                        
+                        # Respond to customer with escalation message
+                        escalation_message = f"Thank you for providing your email. I'll pass this on to our expert support team. They'll follow up shortly at {conversation.email}. Have a great day!"
+                        
+                        # Update conversation state
+                        conversation.state = CallState.COMPLETED
+                        conversation.transcript.append(("AI", escalation_message))
+                        
+                        # Close Deepgram connection
+                        await AudioBridge.close_connection(call_sid)
+                        
+                        # Clean up transcript callback
+                        if call_sid in transcript_callbacks:
+                            del transcript_callbacks[call_sid]
+                        
+                        try:
+                            return await TwilioService.create_hangup_response_with_tts(escalation_message)
+                        except Exception as e:
+                            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                            return TwilioService.create_hangup_response(escalation_message)
+                    except Exception as e:
+                        logger.error(f"Error creating ticket: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
+                        
+                        # Respond to customer with error message
+                        error_message = "I'm sorry, but there was an issue creating a support ticket. Please try contacting our support team directly."
+                        
+                        # Update conversation state
+                        conversation.state = CallState.ERROR
+                        conversation.transcript.append(("AI", error_message))
+                        
+                        # Close Deepgram connection
+                        await AudioBridge.close_connection(call_sid)
+                        
+                        # Clean up transcript callback
+                        if call_sid in transcript_callbacks:
+                            del transcript_callbacks[call_sid]
+                        
+                        try:
+                            return await TwilioService.create_hangup_response_with_tts(error_message)
+                        except Exception as e:
+                            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                            return TwilioService.create_hangup_response(error_message)
+            else:
+                # We don't have a response yet, so we need to process the issue again
+                conversation.state = CallState.COLLECTING_ISSUE
+                
+                try:
+                    return await TwilioService.create_response_with_tts(
+                        message="Thank you for providing your email. Now, how can I assist you today?",
+                        gather_speech=True,
+                        action_url="/process_issue"
+                    )
+                except Exception as e:
+                    logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                    return TwilioService.create_response(
+                        message="Thank you for providing your email. Now, how can I assist you today?",
+                        gather_speech=True,
+                        action_url="/process_issue"
+                    )
+        else:
+            # We don't have an issue yet, so we need to collect it
+            conversation.state = CallState.COLLECTING_ISSUE
+            
+            try:
+                return await TwilioService.create_response_with_tts(
+                    message="Thank you for providing your email. How can I assist you today?",
+                    gather_speech=True,
+                    action_url="/process_issue"
+                )
+            except Exception as e:
+                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                return TwilioService.create_response(
+                    message="Thank you for providing your email. How can I assist you today?",
+                    gather_speech=True,
+                    action_url="/process_issue"
+                )
     except Exception as e:
         logger.error(f"Error processing email", extra={"call_sid": call_sid, "error": str(e)}, exc_info=True)
         try:
@@ -140,20 +277,6 @@ async def process_email(request: Request):
             return TwilioService.create_hangup_response(
                 "I'm sorry, but there was an error processing your email. Please try again."
             )
-    
-    try:
-        return await TwilioService.create_response_with_tts(
-            message="Thank you. How can I assist you today?",
-            gather_speech=True,
-            action_url="/process_issue"
-        )
-    except Exception as e:
-        logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
-        return TwilioService.create_response(
-            message="Thank you. How can I assist you today?",
-            gather_speech=True,
-            action_url="/process_issue"
-        )
 
 @app.post("/process_issue")
 async def process_issue(request: Request):
@@ -193,98 +316,327 @@ async def process_issue(request: Request):
     try:
         conversation.transcript.append(("AI", "How can I assist you today?"))
         conversation.transcript.append(("Customer", issue))
-        conversation.state = CallState.PROCESSING
-        logger.info(f"Issue processed successfully", extra={"call_sid": call_sid})
         
+        # Send an acknowledgment response to the customer while we search for an answer
+        acknowledgment_message = f"Okay, let me look for information about {issue.split()[:3]}... Please hold for a moment."
+        logger.info(f"Sending acknowledgment: {acknowledgment_message}", extra={"call_sid": call_sid})
+        
+        # Create a task to process the issue and generate a response
+        processing_task = asyncio.create_task(process_customer_issue(call_sid, issue, conversation))
+        
+        # Return the acknowledgment response immediately
+        try:
+            return await TwilioService.create_response_with_tts(
+                message=acknowledgment_message,
+                gather_speech=False,
+                action_url="/process_response"
+            )
+        except Exception as e:
+            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+            return TwilioService.create_response(
+                message=acknowledgment_message,
+                gather_speech=False,
+                action_url="/process_response"
+            )
+    except Exception as e:
+        logger.error(f"Error processing issue: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
+        
+        # Respond to customer with error message
+        error_message = "I'm sorry, but there was an error processing your request. Please try again later."
+        
+        # Update conversation state
+        if conversation:
+            conversation.state = CallState.ERROR
+            conversation.transcript.append(("AI", error_message))
+        
+        # Close Deepgram connection
+        await AudioBridge.close_connection(call_sid)
+        
+        # Clean up transcript callback
+        if call_sid in transcript_callbacks:
+            del transcript_callbacks[call_sid]
+        
+        try:
+            return await TwilioService.create_hangup_response_with_tts(error_message)
+        except Exception as e:
+            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+            return TwilioService.create_hangup_response(error_message)
+
+async def process_customer_issue(call_sid: str, issue: str, conversation):
+    """Process the customer's issue in the background."""
+    try:
         # Search Kayako KB for relevant articles
         logger.info(f"Searching Kayako KB for: {issue}", extra={"call_sid": call_sid})
         articles = await KayakoService.search_knowledge_base(issue, limit=3)
         
         if articles:
             # Found relevant articles
-            article = articles[0]  # Use the most relevant article
-            article_title = article.get("title", "")
-            article_id = article.get("id")
+            logger.info(f"Found {len(articles)} relevant articles", extra={"call_sid": call_sid})
             
-            logger.info(f"Found relevant article: {article_title}", extra={"call_sid": call_sid})
+            # Get the full article content for each article
+            full_articles = []
+            for article in articles:
+                article_id = article.get("id")
+                if article_id:
+                    try:
+                        full_article = await KayakoService.get_article_content(article_id)
+                        full_articles.append(full_article)
+                    except Exception as e:
+                        logger.error(f"Error getting article content: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
+                        full_articles.append(article)  # Use the original article if we can't get the full content
+                else:
+                    full_articles.append(article)  # Use the original article if there's no ID
             
-            # Get the full article content
-            if article_id:
-                try:
-                    full_article = await KayakoService.get_article_content(article_id)
-                    article_content = ""
-                    
-                    # Extract content from the article
-                    contents = full_article.get("contents", [])
-                    if contents:
-                        for content in contents:
-                            if content.get("locale", {}).get("id") == 2:  # English content
-                                article_content = content.get("text", "")
-                                break
-                    
-                    # If we have content, use it to create a better response
-                    if article_content:
-                        # In a full implementation, we would use OpenAI to generate a response based on the article content
-                        # For now, just use a simple response with the article title
-                        response_message = f"I found information about '{article_title}'. {article_content[:200]}... Would you like me to continue?"
-                    else:
-                        response_message = f"I found information about '{article_title}'. Would you like me to help you with that?"
-                except Exception as e:
-                    logger.error(f"Error getting article content: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
-                    response_message = f"I found information about '{article_title}'. Would you like me to help you with that?"
-            else:
-                response_message = f"I found information about '{article_title}'. Would you like me to help you with that?"
+            # Generate a response using OpenAI
+            logger.info(f"Generating response with OpenAI", extra={"call_sid": call_sid})
+            response_data = await OpenAIService.generate_response(
+                query=issue,
+                articles=full_articles,
+                conversation_history=conversation.transcript
+            )
             
-            # Update conversation state
-            conversation.state = CallState.RESPONDING
+            response_message = response_data["text"]
+            answer_found = response_data["answer_found"]
+            
+            # Update conversation transcript
             conversation.transcript.append(("AI", response_message))
             
-            # Close Deepgram connection
-            await AudioBridge.close_connection(call_sid)
+            # Store the processing result
+            processing_results[call_sid] = {
+                "response_message": response_message,
+                "answer_found": answer_found,
+                "has_email": conversation.email is not None
+            }
             
-            # Clean up transcript callback
-            if call_sid in transcript_callbacks:
-                del transcript_callbacks[call_sid]
-            
-            try:
-                return await TwilioService.create_hangup_response_with_tts(response_message)
-            except Exception as e:
-                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
-                return TwilioService.create_hangup_response(response_message)
+            logger.info(f"Processing completed for call {call_sid}", extra={"call_sid": call_sid})
         else:
             # No relevant articles found
-            logger.info(f"No relevant articles found for: {issue}", extra={"call_sid": call_sid})
+            logger.info(f"No relevant articles found", extra={"call_sid": call_sid})
             
-            # Update conversation state
-            conversation.state = CallState.COMPLETED
-            
-            # Close Deepgram connection
-            await AudioBridge.close_connection(call_sid)
-            
-            # Clean up transcript callback
-            if call_sid in transcript_callbacks:
-                del transcript_callbacks[call_sid]
-            
-            # Respond with a message indicating that we'll escalate to a human agent
-            response_message = "Thank you for your question. I'll pass this on to our expert support team. They'll follow up shortly via email. Have a great day!"
-            conversation.transcript.append(("AI", response_message))
-            
-            try:
-                return await TwilioService.create_hangup_response_with_tts(response_message)
-            except Exception as e:
-                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
-                return TwilioService.create_hangup_response(response_message)
+            # Store the processing result
+            processing_results[call_sid] = {
+                "response_message": "I couldn't find any information about that in our knowledge base. Let me collect your email so we can have a support agent follow up with you.",
+                "answer_found": False,
+                "has_email": conversation.email is not None
+            }
     except Exception as e:
-        logger.error(f"Error processing issue", extra={"call_sid": call_sid, "error": str(e)}, exc_info=True)
+        logger.error(f"Error in background processing: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
+        
+        # Store the error result
+        processing_results[call_sid] = {
+            "response_message": "I'm sorry, but there was an error processing your request. Please try again later.",
+            "answer_found": False,
+            "has_email": conversation.email is not None,
+            "error": str(e)
+        }
+
+@app.post("/process_response")
+async def process_response(request: Request):
+    """Process the response after acknowledgment."""
+    form_data = await request.form()
+    call_sid = form_data["CallSid"]
+    
+    logger.info(f"Processing response", extra={"call_sid": call_sid})
+    
+    # Update conversation state
+    conversation = conversations.get(call_sid)
+    if not conversation:
+        logger.error(f"Conversation not found", extra={"call_sid": call_sid})
         try:
             return await TwilioService.create_hangup_response_with_tts(
-                "I'm sorry, but there was an error processing your request. Our support team will follow up with you shortly."
+                "I'm sorry, but there was an error with your call. Please try again."
             )
         except Exception as e:
             logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
             return TwilioService.create_hangup_response(
-                "I'm sorry, but there was an error processing your request. Our support team will follow up with you shortly."
+                "I'm sorry, but there was an error with your call. Please try again."
             )
+    
+    try:
+        # Wait for processing to complete with a timeout
+        max_wait_time = 10  # seconds
+        wait_time = 0
+        wait_interval = 0.5  # seconds
+        
+        while call_sid not in processing_results and wait_time < max_wait_time:
+            await asyncio.sleep(wait_interval)
+            wait_time += wait_interval
+        
+        if call_sid not in processing_results:
+            logger.warning(f"Processing timeout for call {call_sid}", extra={"call_sid": call_sid})
+            # Provide a fallback response
+            return await handle_email_collection(call_sid, conversation)
+        
+        # Get the processing result
+        result = processing_results[call_sid]
+        response_message = result["response_message"]
+        answer_found = result["answer_found"]
+        has_email = result["has_email"]
+        
+        # Clean up the processing result
+        del processing_results[call_sid]
+        
+        if answer_found:
+            # If an answer was found, check if we need to collect email
+            if has_email:
+                # We already have the email, so we can end the call
+                conversation.state = CallState.COMPLETED
+                
+                # Close Deepgram connection
+                await AudioBridge.close_connection(call_sid)
+                
+                # Clean up transcript callback
+                if call_sid in transcript_callbacks:
+                    del transcript_callbacks[call_sid]
+                
+                try:
+                    return await TwilioService.create_hangup_response_with_tts(
+                        f"{response_message} Thank you for calling Kayako Support. Have a great day!"
+                    )
+                except Exception as e:
+                    logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                    return TwilioService.create_hangup_response(
+                        f"{response_message} Thank you for calling Kayako Support. Have a great day!"
+                    )
+            else:
+                # We need to collect email
+                conversation.state = CallState.COLLECTING_EMAIL
+                
+                try:
+                    return await TwilioService.create_response_with_tts(
+                        message=f"{response_message} To complete this call, could you please provide your email address?",
+                        gather_speech=True,
+                        action_url="/process_email"
+                    )
+                except Exception as e:
+                    logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                    return TwilioService.create_response(
+                        message=f"{response_message} To complete this call, could you please provide your email address?",
+                        gather_speech=True,
+                        action_url="/process_email"
+                    )
+        else:
+            # No answer found, handle email collection or ticket creation
+            return await handle_email_collection(call_sid, conversation)
+    except Exception as e:
+        logger.error(f"Error processing response: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
+        
+        # Respond to customer with error message
+        error_message = "I'm sorry, but there was an error processing your request. Please try again later."
+        
+        # Update conversation state
+        conversation.state = CallState.ERROR
+        conversation.transcript.append(("AI", error_message))
+        
+        # Close Deepgram connection
+        await AudioBridge.close_connection(call_sid)
+        
+        # Clean up transcript callback
+        if call_sid in transcript_callbacks:
+            del transcript_callbacks[call_sid]
+        
+        try:
+            return await TwilioService.create_hangup_response_with_tts(error_message)
+        except Exception as e:
+            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+            return TwilioService.create_hangup_response(error_message)
+
+async def handle_email_collection(call_sid: str, conversation):
+    """Handle email collection or ticket creation."""
+    if conversation.email is None:
+        # We need to collect email
+        conversation.state = CallState.COLLECTING_EMAIL
+        
+        try:
+            return await TwilioService.create_response_with_tts(
+                message="I'll need to create a support ticket for this. Could you please provide your email address?",
+                gather_speech=True,
+                action_url="/process_email"
+            )
+        except Exception as e:
+            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+            return TwilioService.create_response(
+                message="I'll need to create a support ticket for this. Could you please provide your email address?",
+                gather_speech=True,
+                action_url="/process_email"
+            )
+    else:
+        # We already have the email, so we can create a ticket and end the call
+        conversation.state = CallState.PROCESSING
+        
+        # Generate ticket summary
+        ticket_data = await OpenAIService.create_ticket_summary(conversation.transcript)
+        
+        # Create ticket in Kayako
+        try:
+            ticket = await KayakoService.create_ticket(
+                email=conversation.email,
+                subject=ticket_data["subject"],
+                content=ticket_data["content"],
+                tags=["ai-escalated", "phone-call", "no-kb-match"]
+            )
+            
+            logger.info(f"Ticket created successfully", extra={"call_sid": call_sid})
+            
+            # Respond to customer with escalation message
+            escalation_message = f"I'll pass this on to our expert support team. They'll follow up shortly at {conversation.email}. Have a great day!"
+            
+            # Update conversation state
+            conversation.state = CallState.COMPLETED
+            conversation.transcript.append(("AI", escalation_message))
+            
+            # Close Deepgram connection
+            await AudioBridge.close_connection(call_sid)
+            
+            # Clean up transcript callback
+            if call_sid in transcript_callbacks:
+                del transcript_callbacks[call_sid]
+            
+            try:
+                return await TwilioService.create_hangup_response_with_tts(escalation_message)
+            except Exception as e:
+                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                return TwilioService.create_hangup_response(escalation_message)
+        except Exception as e:
+            logger.error(f"Error creating ticket: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
+            
+            # Respond to customer with error message
+            error_message = "I'm sorry, but there was an issue creating a support ticket. Please try contacting our support team directly."
+            
+            # Update conversation state
+            conversation.state = CallState.ERROR
+            conversation.transcript.append(("AI", error_message))
+            
+            # Close Deepgram connection
+            await AudioBridge.close_connection(call_sid)
+            
+            # Clean up transcript callback
+            if call_sid in transcript_callbacks:
+                del transcript_callbacks[call_sid]
+            
+            try:
+                return await TwilioService.create_hangup_response_with_tts(error_message)
+            except Exception as e:
+                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
+                return TwilioService.create_hangup_response(error_message)
+
+@app.get("/audio/{filename}")
+async def get_audio_file(filename: str):
+    """Serve audio files generated by Deepgram TTS."""
+    # Construct the full path to the audio file
+    file_path = os.path.join(gettempdir(), filename)
+    
+    # Check if the file exists
+    if not os.path.exists(file_path):
+        logger.error(f"Audio file not found: {file_path}")
+        return Response(status_code=404)
+    
+    # Return the file
+    return FileResponse(
+        path=file_path,
+        media_type="audio/mpeg",
+        filename=filename
+    )
 
 @app.websocket("/audio-stream")
 async def audio_stream(websocket: WebSocket, call_sid: Optional[str] = Query(None)):

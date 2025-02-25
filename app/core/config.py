@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     KAYAKO_URL: str = "https://doug-test.kayako.com"
     
     # Deepgram Settings
-    DEEPGRAM_STT_MODEL: str = "nova-2"
+    DEEPGRAM_STT_MODEL: str = "nova-3"
     DEEPGRAM_TTS_MODEL: str = "aura-asteria-en"
     
     # OpenAI Settings

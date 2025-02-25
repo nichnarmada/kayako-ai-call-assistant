@@ -6,6 +6,7 @@ import websockets
 from fastapi import WebSocket
 from app.core.logger import logger
 from app.services.deepgram_service import DeepgramService
+import uuid
 
 class AudioBridge:
     """Bridge for handling audio streaming between Twilio and Deepgram."""
@@ -28,7 +29,7 @@ class AudioBridge:
         
         try:
             # Create Deepgram STT connection
-            deepgram_connection = await DeepgramService.create_stt_connection(transcript_callback)
+            deepgram_connection = await DeepgramService.create_stt_connection(transcript_callback, call_sid)
             
             # Store connection
             cls.active_connections[call_sid] = {
@@ -130,13 +131,16 @@ class AudioBridge:
             # Convert text to speech
             audio_data = await DeepgramService.text_to_speech(text)
             
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-                temp_file.write(audio_data)
-                temp_file.flush()
-                
-                logger.info(f"Generated speech saved to {temp_file.name}")
-                return temp_file.name
+            # Create a unique filename
+            filename = f"tts_{uuid.uuid4()}.mp3"
+            file_path = os.path.join(tempfile.gettempdir(), filename)
+            
+            # Save to file
+            with open(file_path, "wb") as f:
+                f.write(audio_data)
+            
+            logger.info(f"Generated speech saved to {file_path}")
+            return file_path
         except Exception as e:
             logger.error(f"Error generating speech: {str(e)}", exc_info=True)
             raise 
