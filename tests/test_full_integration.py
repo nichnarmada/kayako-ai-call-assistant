@@ -40,7 +40,16 @@ async def simulate_call_flow():
     
     # Step 4: Search Kayako KB
     print("\n4. Searching Kayako KB...")
-    articles = await KayakoService.search_knowledge_base(issue, limit=3)
+    
+    # Extract keywords from the issue
+    print("Extracting keywords from the issue...")
+    keyword_result = await OpenAIService.extract_search_keywords(issue)
+    search_query = keyword_result.get("keywords", issue)
+    print(f"Original issue: '{issue}'")
+    print(f"Extracted search query: '{search_query}'")
+    
+    # Search Kayako KB with the extracted keywords
+    articles = await KayakoService.search_knowledge_base(search_query, limit=3)
     
     if articles:
         print(f"   Found {len(articles)} articles")
