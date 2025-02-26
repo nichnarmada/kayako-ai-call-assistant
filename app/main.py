@@ -14,6 +14,7 @@ from typing import Dict, Optional, Any
 import os
 from fastapi.responses import FileResponse
 from tempfile import gettempdir
+import time
 
 # Initialize FastAPI app
 app = FastAPI(title="Kayako AI Call Assistant")
@@ -365,10 +366,16 @@ async def process_issue(request: Request):
 async def process_customer_issue(call_sid: str, issue: str, conversation):
     """Process the customer's issue in the background."""
     try:
+        # Log the start of processing
+        logger.info(f"🔄 Starting background processing for call {call_sid}", extra={"call_sid": call_sid})
+        start_time = time.time()
+        
         # Extract relevant search keywords from the customer's issue
         logger.info(f"Extracting search keywords from: {issue}", extra={"call_sid": call_sid})
+        keyword_start = time.time()
         keyword_result = await OpenAIService.extract_search_keywords(issue)
         search_query = keyword_result.get("keywords", issue)
+        logger.info(f"Keyword extraction took {time.time() - keyword_start:.2f} seconds", extra={"call_sid": call_sid})
         
         # Log the original issue and the extracted keywords
         logger.info(f"Original issue: '{issue}'", extra={"call_sid": call_sid})
@@ -376,7 +383,9 @@ async def process_customer_issue(call_sid: str, issue: str, conversation):
         
         # Search Kayako KB for relevant articles using the extracted keywords
         logger.info(f"Searching knowledge base...", extra={"call_sid": call_sid})
+        kb_search_start = time.time()
         articles = await KayakoService.search_knowledge_base(search_query, limit=3)
+        logger.info(f"Knowledge base search took {time.time() - kb_search_start:.2f} seconds", extra={"call_sid": call_sid})
         
         if articles:
             # Found relevant articles
@@ -386,6 +395,7 @@ async def process_customer_issue(call_sid: str, issue: str, conversation):
             full_articles = []
             tts_content = None  # Store TTS content for the top article
             
+            article_fetch_start = time.time()
             for i, article in enumerate(articles):
                 article_id = article.get("id")
                 if article_id:
@@ -417,13 +427,17 @@ async def process_customer_issue(call_sid: str, issue: str, conversation):
                     if i == 0 and not tts_content:
                         tts_content = await KayakoService.prepare_article_for_tts(article)
             
+            logger.info(f"Article fetching took {time.time() - article_fetch_start:.2f} seconds", extra={"call_sid": call_sid})
+            
             # Generate a response using OpenAI
             logger.info(f"Generating AI response...", extra={"call_sid": call_sid})
+            ai_response_start = time.time()
             response_data = await OpenAIService.generate_response(
                 query=issue,
                 articles=full_articles,
                 conversation_history=conversation.transcript
             )
+            logger.info(f"AI response generation took {time.time() - ai_response_start:.2f} seconds", extra={"call_sid": call_sid})
             
             response_message = response_data["text"]
             answer_found = response_data["answer_found"]
@@ -439,7 +453,8 @@ async def process_customer_issue(call_sid: str, issue: str, conversation):
                 "tts_content": tts_content  # Include TTS content for article reading
             }
             
-            logger.info(f"✅ Processing completed for call {call_sid}", extra={"call_sid": call_sid})
+            total_time = time.time() - start_time
+            logger.info(f"✅ Processing completed for call {call_sid} in {total_time:.2f} seconds", extra={"call_sid": call_sid})
         else:
             # No relevant articles found
             logger.info(f"No relevant articles found", extra={"call_sid": call_sid})
@@ -450,6 +465,9 @@ async def process_customer_issue(call_sid: str, issue: str, conversation):
                 "answer_found": False,
                 "has_email": conversation.email is not None
             }
+            
+            total_time = time.time() - start_time
+            logger.info(f"✅ Processing completed for call {call_sid} in {total_time:.2f} seconds (no articles found)", extra={"call_sid": call_sid})
     except Exception as e:
         logger.error(f"Error in background processing: {str(e)}", extra={"call_sid": call_sid}, exc_info=True)
         
@@ -460,6 +478,9 @@ async def process_customer_issue(call_sid: str, issue: str, conversation):
             "has_email": conversation.email is not None,
             "error": str(e)
         }
+        
+        total_time = time.time() - start_time
+        logger.error(f"❌ Processing failed for call {call_sid} after {total_time:.2f} seconds: {str(e)}", extra={"call_sid": call_sid})
 
 @app.post("/process_response")
 async def process_response(request: Request):
@@ -469,19 +490,43 @@ async def process_response(request: Request):
     
     logger.info(f"Processing response", extra={"call_sid": call_sid})
     
-    # Get the processing result
-    result = processing_results.get(call_sid)
-    if not result:
-        logger.error(f"Processing result not found", extra={"call_sid": call_sid})
-        try:
-            return await TwilioService.create_hangup_response_with_tts(
-                "I'm sorry, but there was an error with your call. Please try again."
-            )
-        except Exception as e:
-            logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", exc_info=True)
-            return TwilioService.create_hangup_response(
-                "I'm sorry, but there was an error with your call. Please try again."
-            )
+    # Get the processing result with retries
+    result = None
+    max_retries = 5  # Increased from 3 to 5
+    retry_count = 0
+    
+    while not result and retry_count < max_retries:
+        result = processing_results.get(call_sid)
+        if not result:
+            # If result is not ready yet, wait and retry
+            retry_count += 1
+            logger.info(f"Processing result not ready yet, retrying ({retry_count}/{max_retries})...", 
+                       extra={"call_sid": call_sid})
+            
+            if retry_count < max_retries:
+                # Wait before retrying (exponential backoff: 2, 4, 8, 16 seconds)
+                wait_time = 2 ** retry_count
+                logger.info(f"Waiting {wait_time} seconds before retry", extra={"call_sid": call_sid})
+                await asyncio.sleep(wait_time)
+                continue
+            
+            # If we've exhausted retries, return a "still processing" response
+            logger.error(f"Processing result not found after {max_retries} retries", 
+                        extra={"call_sid": call_sid})
+            try:
+                return await TwilioService.create_response_with_tts(
+                    message="I'm still looking for information about your question. This is taking longer than expected. Please continue to hold.",
+                    gather_speech=False,
+                    action_url="/process_response"  # Try again
+                )
+            except Exception as e:
+                logger.error(f"Error creating TTS response, falling back to Twilio TTS: {str(e)}", 
+                            extra={"call_sid": call_sid}, exc_info=True)
+                return TwilioService.create_response(
+                    message="I'm still looking for information about your question. This is taking longer than expected. Please continue to hold.",
+                    gather_speech=False,
+                    action_url="/process_response"  # Try again
+                )
     
     # Get the conversation
     conversation = conversations.get(call_sid)

@@ -52,7 +52,16 @@ class TwilioService:
             
             # Also add a gather as fallback
             resp.gather(input="speech", action=action_url, method="POST")
-            
+        else:
+            # If we're not gathering speech, we need to add a redirect to keep the call active
+            # This is especially important for the acknowledgment message while we process in the background
+            if action_url:
+                # Add a longer pause to give the background task time to process
+                # AI processing with multiple API calls can take several seconds
+                resp.pause(length=8)
+                # Redirect to the action URL to continue the call
+                resp.redirect(action_url, method="POST")
+        
         return Response(content=str(resp), media_type="application/xml")
     
     @staticmethod
@@ -65,6 +74,15 @@ class TwilioService:
             if not action_url:
                 raise ValueError("action_url is required when gather_speech is True")
             resp.gather(input="speech", action=action_url, method="POST")
+        else:
+            # If we're not gathering speech, we need to add a redirect to keep the call active
+            # This is especially important for the acknowledgment message while we process in the background
+            if action_url:
+                # Add a longer pause to give the background task time to process
+                # AI processing with multiple API calls can take several seconds
+                resp.pause(length=8)
+                # Redirect to the action URL to continue the call
+                resp.redirect(action_url, method="POST")
             
         return Response(content=str(resp), media_type="application/xml")
     
